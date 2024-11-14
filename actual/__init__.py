@@ -55,7 +55,7 @@ class Actual(ActualServer):
         password: str = None,
         file: str = None,
         encryption_password: str = None,
-        data_dir: Union[str, pathlib.Path] = None,
+        data_dir: str | pathlib.Path = None,
         cert: str | bool = None,
         bootstrap: bool = False,
         sa_kwargs: dict = None,
@@ -115,11 +115,11 @@ class Actual(ActualServer):
         if not self._session:
             raise ActualError(
                 "No session defined. Use `with Actual() as actual:` construct to generate one.\n"
-                "If you are already using the context manager, try setting a file to use the session."
+                "If you are already using the context manager, try setting a file to use the session.",
             )
         return self._session
 
-    def set_file(self, file_id: Union[str, RemoteFileListDTO]) -> RemoteFileListDTO:
+    def set_file(self, file_id: str | RemoteFileListDTO) -> RemoteFileListDTO:
         """
         Sets the file id for the class for further requests. The file_id argument can be either the name, the remote
         id or the group id (also known as sync_id) from the file. If there are duplicates for the name, this method
@@ -128,19 +128,18 @@ class Actual(ActualServer):
         if isinstance(file_id, RemoteFileListDTO):
             self._file = file_id
             return file_id
-        else:
-            selected_files = []
-            user_files = self.list_user_files()
-            for file in user_files.data:
-                if (file.file_id == file_id or file.name == file_id or file.group_id == file_id) and file.deleted == 0:
-                    selected_files.append(file)
-            if len(selected_files) == 0:
-                raise UnknownFileId(f"Could not find a file id or identifier '{file_id}'")
-            elif len(selected_files) > 1:
-                raise UnknownFileId(f"Multiple files found with identifier '{file_id}'")
-            return self.set_file(selected_files[0])
+        selected_files = []
+        user_files = self.list_user_files()
+        for file in user_files.data:
+            if (file.file_id == file_id or file.name == file_id or file.group_id == file_id) and file.deleted == 0:
+                selected_files.append(file)
+        if len(selected_files) == 0:
+            raise UnknownFileId(f"Could not find a file id or identifier '{file_id}'")
+        if len(selected_files) > 1:
+            raise UnknownFileId(f"Multiple files found with identifier '{file_id}'")
+        return self.set_file(selected_files[0])
 
-    def run_migrations(self, migration_files: List[str]):
+    def run_migrations(self, migration_files: list[str]):
         """Runs the migration files, skipping the ones that have already been run. The files can be retrieved from
         .data_file_index() method. This first file is the base database, and the following files are migrations.
         Migrations can also be .js files. In this case, we have to extract and execute queries from the standard JS."""
@@ -187,7 +186,7 @@ class Actual(ActualServer):
                 "userId": self._token,
                 "cloudFileId": file_id,
                 "resetClock": True,
-            }
+            },
         )
         self._file = RemoteFileListDTO(name=budget_name, fileId=file_id, groupId=None, deleted=0, encryptKeyId=None)
         # generate a session
@@ -220,6 +219,21 @@ class Actual(ActualServer):
         """Export your data as a zip file containing db.sqlite and metadata.json files. It can be imported into another
         Actual instance by closing an open file (if any), then clicking the “Import file” button, then choosing
         “Actual.” Even when encryption is enabled, the exported zip file will not have any encryption."""
+
+        def vacuum_db(cursor: sqlite3.Cursor) -> None:
+            cursor.execute("VACUUM")
+
+        def delete_sync_tables(cursor: sqlite3.Cursor) -> None:
+            # Delete messages from the respective tables
+            cursor.execute("DELETE FROM messages_crdt")
+            cursor.execute("DELETE FROM messages_clock")
+
+        with sqlite3.connect(self._data_dir / "db.sqlite") as conn:
+            cursor = conn.cursor()
+            vacuum_db(cursor)
+            delete_sync_tables(cursor)
+            conn.commit()
+
         temp_file = io.BytesIO()
         with zipfile.ZipFile(temp_file, "a", zipfile.ZIP_DEFLATED, False) as z:
             z.write(self._data_dir / "db.sqlite", "db.sqlite")
@@ -288,7 +302,7 @@ class Actual(ActualServer):
         self.update_metadata({"groupId": None})  # since we don't know what the new group id will be
         self.upload_budget()
 
-    def apply_changes(self, messages: List[Message]):
+    def apply_changes(self, messages: list[Message]):
         """Applies a list of sync changes, based on what the sync method returned on the remote."""
         if not self.engine:
             raise UnknownFileId("No valid file available, download one with download_budget()")
@@ -303,13 +317,13 @@ class Actual(ActualServer):
                 table = get_class_from_reflected_table_name(self._meta, message.dataset)
                 if table is None:
                     raise ActualError(
-                        f"Actual found a table not supported by the library: table '{message.dataset}' not found\n"
+                        f"Actual found a table not supported by the library: table '{message.dataset}' not found\n",
                     )
                 column = get_attribute_from_reflected_table_name(self._meta, message.dataset, message.column)
                 if column is None:
                     raise ActualError(
                         f"Actual found a column not supported by the library: "
-                        f"column '{message.column}' at table '{message.dataset}' not found\n"
+                        f"column '{message.column}' at table '{message.dataset}' not found\n",
                     )
                 # if the current id exists, and it's different from the next one, we update the values
                 next_id = message.row
@@ -385,7 +399,7 @@ class Actual(ActualServer):
         if self._in_context and not self._session:
             self._session = strong_reference_session(Session(self.engine, **self._sa_kwargs))
 
-    def download_master_encryption_key(self, encryption_password: str) -> Optional[bytes]:
+    def download_master_encryption_key(self, encryption_password: str) -> bytes | None:
         """Downloads and assembles the key for decrypting the budget based on the provided encryption password.
         If the user file is not encryption, no key will be returned. If the file was encrypted, the key is assembled
         using the key salt and the password with the PBKDF2HMAC algorithm."""
@@ -428,7 +442,7 @@ class Actual(ActualServer):
                 "fileId": self._file.file_id,
                 "groupId": self._file.group_id,
                 "keyId": self._file.encrypt_key_id,
-            }
+            },
         )
         request.set_timestamp(client_id=self._client.client_id, now=self._client.ts)
         changes = self.sync_sync(request)
@@ -469,12 +483,15 @@ class Actual(ActualServer):
         transactions = get_transactions(self.session, is_parent=True)
         ruleset.run(transactions)
 
-    def _run_bank_sync_account(self, acct: Accounts, start_date: datetime.date) -> List[Transactions]:
+    def _run_bank_sync_account(self, acct: Accounts, start_date: datetime.date) -> list[Transactions]:
         sync_method = acct.account_sync_source
         account_id = acct.account_id
         requisition_id = acct.bank.bank_id if sync_method == "goCardless" else None
         new_transactions_data = self.bank_sync_transactions(
-            sync_method.lower(), account_id, start_date, requisition_id=requisition_id
+            sync_method.lower(),
+            account_id,
+            start_date,
+            requisition_id=requisition_id,
         )
         if isinstance(new_transactions_data, BankSyncErrorDTO):
             raise ActualBankSyncError(
@@ -503,8 +520,10 @@ class Actual(ActualServer):
         return imported_transactions
 
     def run_bank_sync(
-        self, account: str | Accounts | None = None, start_date: datetime.date | None = None
-    ) -> List[Transactions]:
+        self,
+        account: str | Accounts | None = None,
+        start_date: datetime.date | None = None,
+    ) -> list[Transactions]:
         """
         Runs the bank synchronization for the selected account. If missing, all accounts are synchronized. If a
         start_date is provided, is used as a reference, otherwise, the last timestamp of each account will be used. If
